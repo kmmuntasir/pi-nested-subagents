@@ -91,6 +91,7 @@ function createSession(finalText: string) {
     steer: vi.fn(),
     getActiveToolNames: vi.fn(() => ["read"]),
     setActiveToolsByName: vi.fn(),
+    setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
   };
   return { session, listeners };
@@ -184,6 +185,27 @@ describe("agent-runner final output capture", () => {
     const result = await resumeAgent(session as any, "Continue");
 
     expect(result).toBe("RESUMED");
+  });
+
+  it("sets the agent name as session name before binding extensions", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(session.setSessionName).toHaveBeenCalledWith("Explore");
+    const setOrder = session.setSessionName.mock.invocationCallOrder[0];
+    const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
+    expect(setOrder).toBeLessThan(bindOrder);
+  });
+
+  it("suffixes the session name with a short agentId so parallel spawns are distinguishable", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, agentId: "a1b2c3d4e5f6" });
+
+    expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
   });
 });
 

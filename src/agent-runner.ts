@@ -88,6 +88,8 @@ export interface ToolActivity {
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
+  /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
+  agentId?: string;
   model?: Model<any>;
   maxTurns?: number;
   signal?: AbortSignal;
@@ -279,6 +281,11 @@ export async function runAgent(
   }
 
   const { session } = await createAgentSession(sessionOpts);
+
+  const baseSessionName = agentConfig?.name ?? type;
+  session.setSessionName(
+    options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
+  );
 
   // Build disallowed tools set from agent config
   const disallowedSet = agentConfig?.disallowedTools
