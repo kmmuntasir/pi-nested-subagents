@@ -509,6 +509,9 @@ Agent({ subagent_type: "refactor", prompt: "...", isolation: "worktree" })
 The agent gets a full, isolated copy of the repository. On completion:
 - **No changes:** worktree is cleaned up automatically
 - **Changes made:** changes are committed to a new branch (`pi-agent-<id>`) and returned in the result
+- **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
+
+The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
 
 If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` tool returns a clear error instead of running unisolated — `isolation: "worktree"` is a strict guarantee, not a hint. Initialize git and commit at least once, or omit `isolation`.
 

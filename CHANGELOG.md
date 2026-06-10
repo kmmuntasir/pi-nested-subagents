@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-10
+
 ### Added
 - **`disableDefaultAgents` setting** ([#92](https://github.com/tintinweb/pi-subagents/issues/92) — thanks [@TommyC81](https://github.com/TommyC81)). When on, the three built-in default agents (general-purpose, Explore, Plan) are skipped at registration — only user-defined `.pi/agents/*.md` agents are advertised and spawnable. User agents are unaffected, including ones overriding a default by name; with no user agents defined, spawning falls back to the hardcoded generic config. Off by default; toggle via `/agents → Settings → Disable defaults` or `disableDefaultAgents` in `subagents.json`. Like `schedulingEnabled`, the Agent tool's type list reflects the change on the next pi session (tool schema is registered at startup).
 
