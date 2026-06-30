@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.12.1] - 2026-06-30
+## [0.13.0] - 2026-06-30
 
 ### Added
 - **Steer a running agent from the conversation viewer.** The live conversation overlay (FleetView's `Enter`, or `/agents → Running agents`) now lets you redirect an agent without leaving the view: press `Enter` to open an inline composer, type a message, `Enter` to send — `Esc` or an empty submit just returns. The message is delivered through the same path as the `steer_subagent` tool (`AgentManager.steer()` → `session.steer`, or queued onto `pendingSteers` if the session isn't ready yet), so it appears as a user message and redirects the agent after its current tool execution; feedback is the message showing up in the live transcript you're already watching. The affordance is offered only while the agent is still running/queued (mirrors the `x`/stop affordance), and the viewer stays modal — every existing shortcut (`x`/`x` stop, arrows/`j`/`k` scroll, `q` close) is untouched, and `Enter` was previously inert here so nothing is overridden. The idle footer was reorganized to actions-left / navigation-right so the full scroll-key hint (`↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close`) stays fully visible down to 80-column terminals; the `N lines · %` readout returns on the left whenever there's spare width.
