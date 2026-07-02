@@ -1,7 +1,9 @@
 # Security Policy
 
 This document explains the security model behind `@kmmuntasir/pi-nested-subagents` and
-where the boundaries are.
+where the boundaries are. The base extension is the work of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents);
+the security model below is inherited from upstream, unchanged by this fork's
+nesting and verification additions.
 
 `pi-subagents` is a [pi](https://pi.dev) extension. It spawns and orchestrates
 autonomous sub-agents that run locally within the same security boundary as the

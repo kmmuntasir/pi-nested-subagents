@@ -8,6 +8,16 @@ A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-
 https://github.com/kmmuntasir/pi-nested-subagents/raw/main/media/demo.mp4
 
 
+## Why this fork?
+
+This package is a fork of **[`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)** — an excellent Claude Code-style subagent extension for pi. Upstream is preserved here in full: every feature, tool name, calling convention, and UI pattern carries over unchanged. This fork only adds two things upstream's released form deliberately does not do:
+
+1. **Safe, deep, recursive nesting.** Upstream runs subagents at a single level below the top-level session. This fork makes that depth configurable (default 5), so a subagent can delegate further — orchestrator → ticket-handler → planner → leaf workers — with correct result/notification delivery to the *parent* agent, a true parent→child tree in the UI, descendant-scoped tool authority, and fan-out/cost guardrails so depth × breadth can't go exponential.
+2. **Built-in ground-truth verification.** The `subagents_tree` tool, `/agents-tree` command, and optional `verifyLog` let any orchestrator or post-hoc reader audit the actual nesting tree, parent/child links, and event propagation independently of what the agents themselves report.
+
+The full design rationale, the Option-A architecture, and the POC validation live in [`.docs/fork-rationale-and-architecture.md`](.docs/fork-rationale-and-architecture.md). The original author is credited in [Acknowledgements](#acknowledgements).
+
+
 ## Features
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
@@ -623,6 +633,12 @@ src/
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
 ```
 
+## Acknowledgements
+
+This project is a fork of **[`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)** by **[tintinweb](https://github.com/tintinweb)**, originally published under the MIT License. **Full and complete credit for the original design and implementation belongs to the upstream author.** The flat `AgentManager`, the FleetView, the smart/group/async join modes, scheduling, custom agent types, worktree isolation, model scoping, persistent memory, and the entire Claude Code-compatible tool surface are all upstream's work and are preserved here unchanged.
+
+The additions in this fork are scoped strictly to **deep nesting** and **verification**, layered on top of that foundation. Upstream's repository remains the canonical source for the base extension; this fork only extends it for recursive delegation. If this fork is useful to you, please consider [starring the upstream repo](https://github.com/tintinweb/pi-subagents) or [sponsoring tintinweb](https://github.com/sponsors/tintinweb).
+
 ## License
 
-MIT — original by [tintinweb](https://github.com/tintinweb); this fork maintained by [kmmuntasir](https://github.com/kmmuntasir).
+MIT — original work © [tintinweb](https://github.com/tintinweb); this fork is maintained by [kmmuntasir](https://github.com/kmmuntasir) under the same MIT License. See [`LICENSE`](LICENSE) for the full terms.

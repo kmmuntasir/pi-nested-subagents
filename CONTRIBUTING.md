@@ -14,6 +14,13 @@ The extension deliberately mirrors Claude Code's tool names, calling
 conventions, and UI patterns. Changes should respect that compatibility unless
 there's a good reason to diverge.
 
+This package is a **fork of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)**
+that adds deep nesting and ground-truth verification. **Full credit for the base
+extension belongs to the upstream author.** Contributions are welcome here, but
+please consider whether a change is fork-specific (nesting, verification) or
+belongs upstream — base improvements benefit both projects and should go to
+upstream first whenever possible.
+
 ## The One Rule
 
 **You must understand your code.** If you cannot explain what your changes do and
