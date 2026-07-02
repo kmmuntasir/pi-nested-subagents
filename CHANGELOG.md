@@ -5,7 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Lineage** — `@kmmuntasir/pi-nested-subagents` is a fork of
+> [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) v0.13.0 by
+> [tintinweb](https://github.com/tintinweb) (MIT). It re-versions from **0.1.0** as an
+> independent release line — full credit for the original design and implementation
+> belongs to the upstream author. The complete upstream changelog is preserved
+> verbatim below under [Upstream history](#upstream-history--tintinwebpi-subagents).
+
 ## [Unreleased]
+
+## [0.1.0] - 2026-07-02
+
+Initial fork release. The base extension is [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) v0.13.0, preserved unchanged; this release layers on **safe deep subagent nesting** and **built-in ground-truth verification**. See [`.docs/fork-rationale-and-architecture.md`](.docs/fork-rationale-and-architecture.md) for the full design.
+
+### Added
+
+- **Safe, deep, configurable subagent nesting (`maxNestingDepth`, default 5).** Upstream runs subagents at a single level below the top-level session; this fork lets a subagent spawn its own subagents, recursively, up to a configurable depth. Implemented as Option A (extend the flat-root model): `AgentRecord` gains `depth` and `parentId` (`src/types.ts`); each subagent's `{ depth, agentId }` is carried through `session.prompt` via an `AsyncLocalStorage` (`depthContext` in `agent-runner.ts`), so concurrent background spawns never race on depth, and `spawn()` stamps `resolvedDepth = parentDepth + 1`. The spawn tools (`Agent`, `get_subagent_result`, `steer_subagent`) are stripped from a subagent's tool set only once it reaches the floor (`myDepth >= maxNestingDepth`), bounding the chain.
+- **Correct completion routing to the parent agent.** Completion nudges are delivered to the *spawning parent's* session via `parentRecord.session.sendCustomMessage(..., { deliverAs: "followUp" })`, falling back to the top-level session for depth-1 agents (`emitIndividualNudge` in `index.ts`). Previously the root manager's callback closed over the top-level session, so a depth-4 result flooded the top level rather than its depth-3 parent.
+- **Descendant-scoped tool authority.** `get_subagent_result` / `steer_subagent` are authorized against the caller's descendant set (walk `parentId` up to the caller id held in `depthContext`); the top-level session stays unrestricted (`addressDenied` in `index.ts`). A subagent can no longer inspect or steer a sibling or cousin.
+- **Fan-out & cost guardrails.** Bounds depth × breadth so nesting can't go exponential: `maxChildrenPerAgent` (default 4) caps one agent's active children; `maxTotalAgents` (default 32) is a global backstop; `nestingTurnStep` / `nestingTurnFloor` (5 / 6) shrink each level's default `max_turns` so deep agents stay terse; `maxInheritContextDepth` (default 2) drops `inherit_context` past that level (copying parent context deep in the tree is catastrophic). All are enforced in `agent-manager.ts` / `agent-runner.ts`, persisted, and editable via `/agents → Settings` or `.pi/subagents.json`.
+- **Parent→child tree in FleetView.** The below-editor fleet list renders a true depth-first tree (grouped by `parentId`, indented by depth) instead of a flat list, so siblings, cousins, and sequential vs. parallel spawns are legible at 5+ levels (`src/ui/fleet-list.ts`).
+- **Built-in ground-truth verification.** Three new surfaces (all root-only, so they never clutter a sub-agent's tool palette): the read-only **`subagents_tree`** tool dumps the authoritative record tree (`depth`, `parentId`, `status` per agent) plus a root-bus lifecycle-event tally; the **`/agents-tree`** command writes the same tree to the verify log; and the **`verifyLog`** setting (off by default) appends the full tree on every agent completion to `.pi/subagents-verify.log` (or a custom path) — an append-only forensic record of how the tree evolved. Backed by a pure module, `src/verify.ts` (`buildRecordTree()` / `renderRecordTreeText()`). The event tally confirms nested `started`/`completed` events propagate to the root bus.
+
+### Changed
+
+- **Package identity and metadata repointed to the fork.** npm name is now `@kmmuntasir/pi-nested-subagents` (was `@tintinweb/pi-subagents` — a scope the fork cannot publish under); `repository`, `homepage`, `bugs`, and author/contributors point at `kmmuntasir/pi-nested-subagents`, with full credit to tintinweb retained in the description, `LICENSE`, `README`, `CONTRIBUTING`, and `SECURITY`. CI now triggers on `main` (was `master`); README install command, screenshot/demo URLs, and license line updated. `pi.image`/`pi.video` were dropped (they referenced upstream's `master` branch and 404 here). The `Sponsor` button (`FUNDING.yml`) intentionally still credits upstream.
+- **All built-in default agents now inherit the parent model.** The `Explore` agent no longer pins `anthropic/claude-haiku-4-5` — `general-purpose`, `Explore`, and `Plan` all omit `model:` and run on whatever the top-level session is using, so they work with any provider instead of silently resolving through Anthropic.
+
+### Fixed
+
+- **Nested `session_start` no longer wipes the shared registry.** Every extension instance (including nested ones) registered `pi.on("session_start", () => manager.clearCompleted(true))` against the *shared root* manager, so each new subagent session deleted all previously-completed records — a sequential `planner → implementer → verifier` chain lost the planner's subtree the instant the implementer started. The clear is now gated on `if (!isNested)` (matching the guard already on the adjacent lines); root still clears on its own `session_start` / `/reload` / `/new`. This is the bug the verification mechanism was built to catch — `subagents_tree` showed records vanishing mid-run that the agents' self-reports never mentioned.
+- **Test regressions from the fork changes (675-test suite green).** Added `depthContext` to the `agent-runner` mock in `agent-manager.test.ts`; updated the `EXCLUDED_TOOL_NAMES` test to the new depth-conditional semantics (exclusion now applies at the nesting floor); and reset the `Symbol.for("pi-subagents:manager")` root singleton between tests in the wiring suites so each test reinitializes as a root instead of being misdetected as `isNested`.
+
+---
+
+## Upstream history — tintinweb/pi-subagents
+
+The entries below document the base extension this fork is built on (v0.13.0 and earlier), preserved verbatim for attribution. Version numbers and all links reference the upstream repository; this fork's version line starts fresh at 0.1.0 above.
 
 ## [0.13.0] - 2026-06-30
 
@@ -565,6 +601,8 @@ Initial release.
 - **Thinking level** — per-agent extended thinking control
 - **`/agent` and `/agents` commands**
 
+[Unreleased]: https://github.com/kmmuntasir/pi-nested-subagents/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/kmmuntasir/pi-nested-subagents/releases/tag/v0.1.0
 [0.6.3]: https://github.com/tintinweb/pi-subagents/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/tintinweb/pi-subagents/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/tintinweb/pi-subagents/compare/v0.6.0...v0.6.1

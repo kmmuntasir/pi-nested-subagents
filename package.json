@@ -1,6 +1,6 @@
 {
   "name": "@kmmuntasir/pi-nested-subagents",
-  "version": "0.14.0",
+  "version": "0.1.0",
   "description": "A pi extension that brings Claude Code-style autonomous sub-agents to pi, with safe configurable nesting depth and built-in ground-truth verification. Fork of tintinweb/pi-subagents.",
   "author": "kmmuntasir",
   "contributors": [
