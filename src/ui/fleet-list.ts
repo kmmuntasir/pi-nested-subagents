@@ -44,7 +44,7 @@ export type FleetUICtx = {
 };
 
 type MainEntry = { kind: "main" };
-type AgentEntry = { kind: "agent"; record: AgentRecord };
+type AgentEntry = { kind: "agent"; record: AgentRecord; treeDepth: number };
 type FleetEntry = MainEntry | AgentEntry;
 
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
@@ -144,7 +144,7 @@ export class FleetList {
   /** Re-register/refresh the below-editor widget; clears it when no agents remain. */
   update(): void {
     if (!this.ui) return;
-    const hasAgents = this.enabled && this.agentRecords().length > 0;
+    const hasAgents = this.enabled && this.agentEntries().length > 0;
 
     if (!hasAgents) {
       if (this.widgetRegistered) {
@@ -185,19 +185,43 @@ export class FleetList {
    * Pending agents with no session yet are hidden until they start.
    * (`listAgents()` is newest-first, so we re-sort.)
    */
-  private agentRecords(): AgentRecord[] {
+  private agentEntries(): AgentEntry[] {
     const now = Date.now();
-    return this.manager.listAgents()
-      .filter(a => a.session && (
-        a.status === "running" || a.status === "queued"
-        || a.id === this.viewingAgentId
-        || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
-      ))
-      .sort((a, b) => a.startedAt - b.startedAt);
+    const records = this.manager.listAgents().filter(a => a.session && (
+      a.status === "running" || a.status === "queued"
+      || a.id === this.viewingAgentId
+      || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+    ));
+    // Group by parent and walk depth-first so each agent is immediately followed
+    // by its descendants. Roots = agents whose parentId is absent OR not in the
+    // visible set (orphaned when a parent already dropped out). treeDepth drives
+    // indentation; startedAt keeps siblings stable/oldest-first.
+    const byId = new Map(records.map(r => [r.id, r]));
+    const childrenOf = new Map<string, AgentRecord[]>();
+    const roots: AgentRecord[] = [];
+    for (const r of records) {
+      if (r.parentId && byId.has(r.parentId)) {
+        let list = childrenOf.get(r.parentId);
+        if (!list) { list = []; childrenOf.set(r.parentId, list); }
+        list.push(r);
+      } else {
+        roots.push(r);
+      }
+    }
+    const byStartedAt = (a: AgentRecord, b: AgentRecord) => a.startedAt - b.startedAt;
+    roots.sort(byStartedAt);
+    for (const list of childrenOf.values()) list.sort(byStartedAt);
+    const out: AgentEntry[] = [];
+    const walk = (rec: AgentRecord, depth: number) => {
+      out.push({ kind: "agent", record: rec, treeDepth: depth });
+      for (const c of (childrenOf.get(rec.id) ?? [])) walk(c, depth + 1);
+    };
+    for (const root of roots) walk(root, 1);
+    return out;
   }
 
   private roster(): FleetEntry[] {
-    return [{ kind: "main" }, ...this.agentRecords().map(record => ({ kind: "agent" as const, record }))];
+    return [{ kind: "main" }, ...this.agentEntries()];
   }
 
   private clampSelection(): void {
@@ -221,7 +245,7 @@ export class FleetList {
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
       const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
-      if (isActivator && this.agentRecords().length > 0 && this.ui.getEditorText() === "") {
+      if (isActivator && this.agentEntries().length > 0 && this.ui.getEditorText() === "") {
         this.active = true;
         this.selectedIndex = 0;
         this.update();
@@ -338,7 +362,7 @@ export class FleetList {
 
     if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
     for (let a = start; a < start + visible; a++) {
-      lines.push(this.renderAgentRow(a + 1, sel, agents[a].record, width, theme));
+      lines.push(this.renderAgentRow(a + 1, sel, agents[a], width, theme));
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
 
@@ -349,8 +373,13 @@ export class FleetList {
     return rosterIndex === sel ? theme.fg("accent", "⏺") : theme.fg("dim", "◯");
   }
 
-  private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", getDisplayName(record.type))}  ${record.description}`;
+  private renderAgentRow(rosterIndex: number, sel: number, entry: AgentEntry, width: number, theme: Theme): string {
+    // Indent by tree depth so descendants visually nest under their parent
+    // (Option A true-tree ordering). treeDepth comes from the DFS walk in
+    // agentEntries(); depth-1 agents keep the original spacing.
+    const record = entry.record;
+    const indent = "  ".repeat(Math.max(0, entry.treeDepth - 1));
+    const left = `${indent}  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", getDisplayName(record.type))}  ${record.description}`;
     const tokens = getLifetimeTotal(this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const right = theme.fg("dim", `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}`);

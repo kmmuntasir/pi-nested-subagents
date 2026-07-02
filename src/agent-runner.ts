@@ -2,6 +2,7 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
@@ -157,6 +158,44 @@ export function getGraceTurns(): number { return graceTurns; }
 export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
 
 /**
+ * Maximum subagent nesting depth. Depth 0 = the top-level pi session (it
+ * always has the Agent tool — it's the parent). A subagent created at depth
+ * `d` is allowed to spawn its own children only while `d < maxNestingDepth`:
+ *   - 1 → no nesting (reproduces upstream behavior: subagents never inherit the
+ *     spawn tools).
+ *   - 2 → subagents (depth 1) MAY spawn grandchildren; grandchildren (depth 2)
+ *     have the spawn tools filtered out, so the chain stops there.
+ *   - N → up to N levels of subagents below the top-level session.
+ * Defaults to 5 for this build so deeper nesting works out of the box, gated by
+ * the breadth/total/turn guardrails below. Set to 1 to reproduce upstream behavior.
+ */
+let maxNestingDepth = 5;
+
+export function getMaxNestingDepth(): number { return maxNestingDepth; }
+
+export function setMaxNestingDepth(n: number): void { maxNestingDepth = Math.max(1, Math.floor(n)); }
+
+// --- Per-level guardrails (Option A) ---
+let nestingTurnStep = 5;
+let nestingTurnFloor = 6;
+let maxInheritContextDepth = 2;
+export function getNestingTurnStep(): number { return nestingTurnStep; }
+export function setNestingTurnStep(n: number): void { nestingTurnStep = Math.max(0, Math.floor(n)); }
+export function getNestingTurnFloor(): number { return nestingTurnFloor; }
+export function setNestingTurnFloor(n: number): void { nestingTurnFloor = Math.max(1, Math.floor(n)); }
+export function getMaxInheritContextDepth(): number { return maxInheritContextDepth; }
+export function setMaxInheritContextDepth(n: number): void { maxInheritContextDepth = Math.max(1, Math.floor(n)); }
+
+/**
+ * AsyncLocalStorage carrying the CURRENT subagent's depth through its async
+ * execution. Each runAgent() invocation wraps its session run in its own store,
+ * so concurrent (background) subagents never race on depth. A re-initialized
+ * pi-subagents extension running INSIDE a subagent session reads this store to
+ * stamp the correct child depth (`myDepth + 1`) when its own Agent tool fires.
+ */
+export const depthContext = new AsyncLocalStorage<{ depth: number; agentId?: string }>();
+
+/**
  * Try to find the right model for an agent type.
  * Priority: explicit option > config.model > parent model.
  */
@@ -204,6 +243,12 @@ export interface RunOptions {
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Nesting depth of this subagent. 0 (default/absent) = spawned directly by
+   * the top-level session; 1 = child of a depth-0 subagent; and so on. The
+   * manager stamps `parentDepth + 1` (read from depthContext) on every spawn.
+   */
+  depth?: number;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
@@ -551,9 +596,15 @@ export async function runAgent(
   // pi-mono's `allowedToolNames` gates BOTH registration and the initial active
   // set, so listing the exact final set here means the session is correctly
   // scoped from the first instant — no post-construction narrowing required.
+  // Nesting depth of the subagent being created (0 = spawned by the top-level
+  // session). It decides whether THIS subagent may itself spawn children: it
+  // inherits the Agent / get_subagent_result / steer_subagent tools only while
+  // myDepth < maxNestingDepth. At the floor (myDepth >= maxNestingDepth) the
+  // same exclusion as upstream applies, bounding the chain.
+  const myDepth = options.depth ?? 0;
   const builtinToolNameSet = new Set(toolNames);
   const allowedTools = [...toolNames, ...extensionToolNames].filter((t) => {
-    if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
+    if (EXCLUDED_TOOL_NAMES.includes(t) && myDepth >= maxNestingDepth) return false;
     if (disallowedSet?.has(t)) return false;
     if (builtinToolNameSet.has(t)) return true;
     // Reached only for extension tools. The extension set was already filtered
@@ -607,7 +658,15 @@ export async function runAgent(
 
   // Track turns for graceful max_turns enforcement
   let turnCount = 0;
-  const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
+  // Per-level turn shrink (guardrail): when no explicit max_turns is set
+  // (neither caller nor agent frontmatter), reduce the default by
+  // nestingTurnStep per depth level, floored at nestingTurnFloor — deep agents
+  // must stay terse. Explicit max_turns is always respected as-is.
+  const explicitMaxTurns = options.maxTurns ?? agentConfig?.maxTurns;
+  const effectiveMaxTurns = explicitMaxTurns != null
+    ? explicitMaxTurns
+    : Math.max(nestingTurnFloor, (defaultMaxTurns ?? 30) - (myDepth - 1) * nestingTurnStep);
+  const maxTurns = normalizeMaxTurns(effectiveMaxTurns);
   let softLimitReached = false;
   let aborted = false;
 
@@ -657,7 +716,13 @@ export async function runAgent(
 
   // Build the effective prompt: optionally prepend parent context
   let effectivePrompt = prompt;
-  if (options.inheritContext) {
+  // Guardrail: inherit_context copies the parent's full context — catastrophic
+  // at depth. Drop it past maxInheritContextDepth (with a tool-activity signal).
+  const allowInherit = options.inheritContext && myDepth <= maxInheritContextDepth;
+  if (options.inheritContext && !allowInherit) {
+    options.onToolActivity?.({ type: "end", toolName: `guardrail:inherit_context dropped at depth ${myDepth} (max ${maxInheritContextDepth})` });
+  }
+  if (allowInherit) {
     const parentContext = buildParentContext(ctx);
     if (parentContext) {
       effectivePrompt = parentContext + prompt;
@@ -665,7 +730,13 @@ export async function runAgent(
   }
 
   try {
-    await session.prompt(effectivePrompt);
+    // Carry this subagent's depth through its whole execution so a
+    // re-initialized pi-subagents extension inside this session can read its
+    // own depth (via depthContext) and stamp the correct child depth when its
+    // Agent tool fires. AsyncLocalStorage propagates across awaits and any
+    // async flow initiated here, so each (possibly concurrent background)
+    // subagent keeps its own depth without races.
+    await depthContext.run({ depth: myDepth, agentId: options.agentId }, () => session.prompt(effectivePrompt));
   } finally {
     unsubTurns();
     collector.unsubscribe();

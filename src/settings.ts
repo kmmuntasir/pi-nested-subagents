@@ -83,6 +83,39 @@ export interface SubagentsSettings {
    * widget).
    */
   widgetMode?: WidgetMode;
+  /**
+   * Maximum subagent nesting depth (POC feature).
+   *   - 1 → no nesting (upstream behavior: subagents never inherit the spawn tools)
+   *   - 2 → subagents may spawn grandchildren; grandchildren cannot spawn (default)
+   *   - N → up to N levels below the top-level session
+   * The top-level pi session is depth 0 and always has the Agent tool. See
+   * `getMaxNestingDepth()` in agent-runner.ts for the runtime rule.
+   */
+  maxNestingDepth?: number;
+  /** Max simultaneous children (running+queued) a single agent may spawn.
+   * Bounds fan-out so depth × breadth can't go exponential. Default 4. */
+  maxChildrenPerAgent?: number;
+  /** Hard ceiling on total active (running+queued) agents across the whole tree.
+   * Backstop against runaway fan-out. Default 32. */
+  maxTotalAgents?: number;
+  /** Per-level default-`max_turns` shrink step. When an agent has no explicit
+   * max_turns, the default is reduced by this much per depth level, floored at
+   * `nestingTurnFloor`. Deep agents must stay terse. Default 5. */
+  nestingTurnStep?: number;
+  /** Minimum default `max_turns` after per-level shrinking. Default 6. */
+  nestingTurnFloor?: number;
+  /** Deepest level at which `inherit_context` is allowed. Inheriting copies the
+   * parent's full context — catastrophic at depth — so it's dropped past this
+   * level. Default 2. */
+  maxInheritContextDepth?: number;
+  /** Append the authoritative record tree + event lines to a log on every agent
+   * completion — a mode-agnostic forensic record of what actually ran (depths,
+   * parent links, event propagation). `true` → default path
+   * (<cwd>/.pi/subagents-verify.log); a non-empty string → custom path;
+   * `false`/omitted → off. Default off (per-completion disk I/O). Native
+   * successor to the nesting-probe POC. Surfaced via the `subagents_tree` tool
+   * and `/agents-tree` command regardless of this setting. */
+  verifyLog?: boolean | string;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -99,6 +132,13 @@ export interface SettingsAppliers {
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
   setWidgetMode: (mode: WidgetMode) => void;
+  setMaxNestingDepth: (n: number) => void;
+  setMaxChildrenPerAgent: (n: number) => void;
+  setMaxTotalAgents: (n: number) => void;
+  setNestingTurnStep: (n: number) => void;
+  setNestingTurnFloor: (n: number) => void;
+  setMaxInheritContextDepth: (n: number) => void;
+  setVerifyLog: (v: boolean | string | undefined) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -114,6 +154,9 @@ const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "bac
 const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
+const MAX_NESTING_DEPTH_CEILING = 16;
+const MAX_CHILDREN_CEILING = 64;
+const MAX_TOTAL_AGENTS_CEILING = 512;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
@@ -161,6 +204,33 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
     out.widgetMode = r.widgetMode as WidgetMode;
+  }
+  if (
+    Number.isInteger(r.maxNestingDepth) &&
+    (r.maxNestingDepth as number) >= 1 &&
+    (r.maxNestingDepth as number) <= MAX_NESTING_DEPTH_CEILING
+  ) {
+    out.maxNestingDepth = r.maxNestingDepth as number;
+  }
+  if (Number.isInteger(r.maxChildrenPerAgent) && (r.maxChildrenPerAgent as number) >= 0 && (r.maxChildrenPerAgent as number) <= MAX_CHILDREN_CEILING) {
+    out.maxChildrenPerAgent = r.maxChildrenPerAgent as number;
+  }
+  if (Number.isInteger(r.maxTotalAgents) && (r.maxTotalAgents as number) >= 1 && (r.maxTotalAgents as number) <= MAX_TOTAL_AGENTS_CEILING) {
+    out.maxTotalAgents = r.maxTotalAgents as number;
+  }
+  if (Number.isInteger(r.nestingTurnStep) && (r.nestingTurnStep as number) >= 0) {
+    out.nestingTurnStep = r.nestingTurnStep as number;
+  }
+  if (Number.isInteger(r.nestingTurnFloor) && (r.nestingTurnFloor as number) >= 1) {
+    out.nestingTurnFloor = r.nestingTurnFloor as number;
+  }
+  if (Number.isInteger(r.maxInheritContextDepth) && (r.maxInheritContextDepth as number) >= 1) {
+    out.maxInheritContextDepth = r.maxInheritContextDepth as number;
+  }
+  if (typeof r.verifyLog === "boolean") {
+    out.verifyLog = r.verifyLog;
+  } else if (typeof r.verifyLog === "string" && r.verifyLog.trim() !== "") {
+    out.verifyLog = r.verifyLog.trim();
   }
   return out;
 }
@@ -222,6 +292,13 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
+  if (typeof s.maxNestingDepth === "number") appliers.setMaxNestingDepth(s.maxNestingDepth);
+  if (typeof s.maxChildrenPerAgent === "number") appliers.setMaxChildrenPerAgent(s.maxChildrenPerAgent);
+  if (typeof s.maxTotalAgents === "number") appliers.setMaxTotalAgents(s.maxTotalAgents);
+  if (typeof s.nestingTurnStep === "number") appliers.setNestingTurnStep(s.nestingTurnStep);
+  if (typeof s.nestingTurnFloor === "number") appliers.setNestingTurnFloor(s.nestingTurnFloor);
+  if (typeof s.maxInheritContextDepth === "number") appliers.setMaxInheritContextDepth(s.maxInheritContextDepth);
+  if (s.verifyLog !== undefined) appliers.setVerifyLog(s.verifyLog);
 }
 
 /**

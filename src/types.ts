@@ -126,6 +126,22 @@ export interface AgentRecord {
   isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /**
+   * Nesting depth (POC). 1 = spawned by the top-level session; 2 = a grandchild
+   * spawned by a depth-1 subagent; etc. (The top-level session itself is depth 0
+   * and is never tracked.) Used by the FleetView to indent nested agents so
+   * grandchildren are visually grouped under their parent. Set at spawn from
+   * the manager's resolvedDepth.
+   */
+  depth?: number;
+  /**
+   * Id of the spawning agent (Option A nesting). Read from depthContext at spawn.
+   * Undefined for depth-1 agents (their parent is the top-level session, which is
+   * not itself a tracked AgentRecord). Used to (a) route completion nudges to the
+   * parent agent's session, (b) scope get_subagent_result/steer_subagent to
+   * descendants, and (c) render a true parent→child tree in FleetView.
+   */
+  parentId?: string;
 }
 
 export interface AgentInvocation {

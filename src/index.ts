@@ -10,13 +10,14 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { renderRecordTreeText } from "./verify.js";
+import { depthContext, getAgentConversation, getDefaultMaxTurns, getMaxInheritContextDepth, getMaxNestingDepth, getGraceTurns, getNestingTurnFloor, getNestingTurnStep, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setMaxInheritContextDepth, setMaxNestingDepth, setGraceTurns, setNestingTurnFloor, setNestingTurnStep, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -300,13 +301,29 @@ export default function (pi: ExtensionAPI) {
 
     const notification = formatTaskNotification(record, 500);
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
-
-    pi.sendMessage<NotificationDetails>({
+    const message = {
       customType: "subagent-notification",
       content: notification + footer,
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
-    }, { deliverAs: "followUp", triggerTurn: true });
+    };
+    const opts = { deliverAs: "followUp" as const, triggerTurn: true };
+
+    // Route the nudge to the SPAWNING PARENT's session when there is one, so the
+    // parent agent (not the top-level) is re-prompted to consume the result.
+    // Depth-1 agents (no parentId) fall through to the top-level session, which
+    // is their effective consumer. AgentSession.sendCustomMessage is public and
+    // we hold the parent's live session on its record (Phase 0 finding).
+    const parent = record.parentId ? manager.getRecord(record.parentId) : undefined;
+    const parentSession = parent?.session as { sendCustomMessage?: (m: any, o: any) => Promise<void> | void } | undefined;
+    if (parentSession?.sendCustomMessage) {
+      Promise.resolve(parentSession.sendCustomMessage(message, opts)).catch(() => {
+        // Parent session gone/unavailable → fall back to the top-level.
+        pi.sendMessage<NotificationDetails>(message, opts);
+      });
+    } else {
+      pi.sendMessage<NotificationDetails>(message, opts);
+    }
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -315,6 +332,27 @@ export default function (pi: ExtensionAPI) {
     fleet.onAgentFinished(record.id);
     scheduleNudge(record.id, () => emitIndividualNudge(record));
     widget.update();
+  }
+
+  /**
+   * Address authorization for get_subagent_result / steer_subagent. A subagent
+   * (its agentId is in the current depthContext scope) may only address its OWN
+   * descendants (walk record.parentId up to the caller). The top-level session
+   * has no caller agentId → unrestricted (it owns the whole tree). Returns an
+   * error string when access is denied, undefined when allowed.
+   */
+  function addressDenied(targetId: string): string | undefined {
+    const callerId = depthContext.getStore()?.agentId;
+    if (!callerId) return undefined;              // top-level → unrestricted
+    if (targetId === callerId) return undefined;   // self
+    const seen = new Set<string>();
+    let cur = manager.getRecord(targetId);
+    while (cur?.parentId) {
+      if (cur.parentId === callerId) return undefined;
+      if (!seen.add(cur.id)) break;               // cycle guard
+      cur = manager.getRecord(cur.parentId);
+    }
+    return `Agent "${targetId}" is not one of your descendants; you may only address agents you spawned.`;
   }
 
   // ---- Group join manager ----
@@ -377,7 +415,48 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Background completion: route through group join or send individual nudge
-  const manager = new AgentManager((record) => {
+  //
+  // --- Nesting detection (POC: multi-level subagents) ---
+  // The root instance publishes its AgentManager on globalThis under a
+  // well-known Symbol. When setup() re-runs INSIDE a subagent session (which
+  // happens because runAgent loads extensions fresh per subagent), we detect
+  // the already-published root manager and REUSE it. That way grandchildren
+  // are tracked in the same registry the top-level FleetList/widget read from,
+  // so they appear in the TUI. Operations that must stay unique to the root
+  // (the global slot itself, the /agents command, RPC handlers, the scheduler,
+  // shutdown disposal) are gated on `!isNested` below.
+  const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+  const existingRoot = (globalThis as any)[MANAGER_KEY] as { __raw?: AgentManager } | undefined;
+  const isNested = !!existingRoot?.__raw;
+  let manager: AgentManager;
+
+  // --- Verify (ground-truth) state -------------------------------------
+  // Native successor to the nesting-probe POC. Only the ROOT instance's state
+  // is load-bearing: the onComplete callback (defined in the root branch below)
+  // closes over THESE bindings, and the event-tally subscription +
+  // `subagents_tree` tool are registered under `!isNested`. Nested instances
+  // get harmless unused copies. See src/verify.ts and
+  // .docs/ai-generated/integrate-verify-into-subagents.md.
+  const verifyEventTally = new Map<string, number>();
+  let verifyLogSetting: boolean | string | undefined;
+  let verifyLogPath: string | undefined;
+  function resolveVerifyLogPath(v: boolean | string | undefined): string | undefined {
+    if (v === undefined || v === false) return undefined;
+    if (v === true) return join(process.cwd(), ".pi", "subagents-verify.log");
+    return v; // explicit path
+  }
+  function setVerifyLog(v: boolean | string | undefined): void {
+    verifyLogSetting = v;
+    verifyLogPath = resolveVerifyLogPath(v);
+  }
+  function getVerifyLog(): boolean | string | undefined {
+    return verifyLogSetting;
+  }
+
+  if (isNested) {
+    manager = existingRoot!.__raw!;
+  } else {
+  manager = new AgentManager((record) => {
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -385,6 +464,16 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:failed", eventData);
     } else {
       pi.events.emit("subagents:completed", eventData);
+    }
+
+    // Verify: append the authoritative record tree on every terminal event
+    // when `verifyLog` is enabled. Independent of notification routing, so the
+    // log captures the full evolving tree (records appearing/completing) for
+    // post-hoc forensics — the feature that surfaced the clearCompleted wipe.
+    if (verifyLogPath) {
+      try {
+        appendFileSync(verifyLogPath, renderRecordTreeText(manager.listAgents(), { eventTally: verifyEventTally }) + "\n");
+      } catch { /* non-essential */ }
     }
 
     // Persist final record for cross-extension history reconstruction
@@ -435,17 +524,38 @@ export default function (pi: ExtensionAPI) {
       compactionCount: record.compactionCount,
     });
   });
+  } // end root-manager construction (else branch)
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
-  const MANAGER_KEY = Symbol.for("pi-subagents:manager");
-  (globalThis as any)[MANAGER_KEY] = {
-    waitForAll: () => manager.waitForAll(),
-    hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
-    getRecord: (id: string) => manager.getRecord(id),
-  };
+  // Only the ROOT instance publishes (and owns) the global slot; nested instances
+  // reuse it, so we never overwrite the root's facade with a child's.
+  if (!isNested) {
+    (globalThis as any)[MANAGER_KEY] = {
+      waitForAll: () => manager.waitForAll(),
+      hasRunning: () => manager.hasRunning(),
+      spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
+        manager.spawn(piRef, ctx, type, prompt, options),
+      getRecord: (id: string) => manager.getRecord(id),
+      // Raw handle so a re-initialized (nested) setup() can reuse this exact
+      // manager instance instead of creating a parallel one grandchildren would
+      // vanish into. (POC addition.)
+      __raw: manager,
+    };
+
+    // Verify: tally lifecycle events on the root bus. Confirms nested agents'
+    // started/completed propagate up (concern P6). Surfaced via `subagents_tree`.
+    for (const e of [
+      "subagents:created",
+      "subagents:started",
+      "subagents:completed",
+      "subagents:failed",
+      "subagents:steered",
+      "subagents:compacted",
+    ]) {
+      pi.events.on(e, () => verifyEventTally.set(e, (verifyEventTally.get(e) ?? 0) + 1));
+    }
+  }
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
@@ -474,21 +584,38 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    manager.clearCompleted(true);
-    if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
+    // Only the ROOT instance owns the shared manager's registry. Nested
+    // subagent sessions reuse this same manager, so clearing here would wipe
+    // completed sibling/ancestor records (e.g. an earlier sequential step's
+    // subtree) from the one map FleetView + get_subagent_result read from.
+    if (!isNested) manager.clearCompleted(true);
+    if (!isNested && isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
   pi.on("session_before_switch", () => {
+    if (isNested) return;
     manager.clearCompleted(true);
     scheduler.stop();
   });
 
-  const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
-    events: pi.events,
-    pi,
-    getCtx: () => currentCtx,
-    manager,
-  });
+  // RPC + scheduler + /agents command belong to the ROOT instance only. Nested
+  // instances (running inside a subagent session) reuse the root manager and
+  // skip these to avoid duplicate command registration, double event handling,
+  // and a second scheduler competing for the same store.
+  let unsubPingRpc: () => void = () => {};
+  let unsubSpawnRpc: () => void = () => {};
+  let unsubStopRpc: () => void = () => {};
+  if (!isNested) {
+    const rpc = registerRpcHandlers({
+      events: pi.events,
+      pi,
+      getCtx: () => currentCtx,
+      manager,
+    });
+    unsubPingRpc = rpc.unsubPing;
+    unsubSpawnRpc = rpc.unsubSpawn;
+    unsubStopRpc = rpc.unsubStop;
+  }
 
   // Broadcast readiness so extensions loaded after us can discover us
   pi.events.emit("subagents:ready", {});
@@ -500,13 +627,17 @@ export default function (pi: ExtensionAPI) {
     unsubStopRpc();
     unsubPingRpc();
     currentCtx = undefined;
-    delete (globalThis as any)[MANAGER_KEY];
-    scheduler.stop();
-    manager.abortAll();
-    for (const timer of pendingNudges.values()) clearTimeout(timer);
-    pendingNudges.clear();
-    fleet.dispose();
-    manager.dispose();
+    // Nested sessions never own the global slot, the scheduler, or the root
+    // manager — disposing those here would tear down the top-level's TUI state.
+    if (!isNested) {
+      delete (globalThis as any)[MANAGER_KEY];
+      scheduler.stop();
+      manager.abortAll();
+      for (const timer of pendingNudges.values()) clearTimeout(timer);
+      pendingNudges.clear();
+      fleet.dispose();
+      manager.dispose();
+    }
   });
 
   // Live widget: show running agents above editor.
@@ -679,6 +810,13 @@ export default function (pi: ExtensionAPI) {
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setWidgetMode: setWidgetMode,
+      setMaxNestingDepth,
+      setMaxChildrenPerAgent: (n) => manager.setMaxChildrenPerAgent(n),
+      setMaxTotalAgents: (n) => manager.setMaxTotalAgents(n),
+      setNestingTurnStep,
+      setNestingTurnFloor,
+      setMaxInheritContextDepth,
+      setVerifyLog,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1358,6 +1496,10 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
+      // Authorization: a subagent may only query its own descendants.
+      const denied = addressDenied(params.agent_id);
+      if (denied) return textResult(denied);
+
       // Wait for completion if requested.
       // Pre-mark resultConsumed BEFORE awaiting: onComplete fires inside .then()
       // (attached earlier at spawn time) and always runs before this await resumes.
@@ -1434,6 +1576,9 @@ Terse command-style prompts produce shallow, generic work.
       if (record.status !== "running") {
         return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
       }
+      // Authorization: a subagent may only steer its own descendants.
+      const denied = addressDenied(params.agent_id);
+      if (denied) return textResult(denied);
       if (!record.session) {
         // Session not ready yet — queue the steer for delivery once initialized
         if (!record.pendingSteers) record.pendingSteers = [];
@@ -1461,6 +1606,41 @@ Terse command-style prompts produce shallow, generic work.
       }
     },
   }));
+
+  // ---- subagents_tree: ground-truth verify tool + /agents-tree (root-only) ----
+  // Native successor to nesting-probe's probe_dump. Read-only dump of the shared
+  // root manager's record tree (depth + parentId + status) plus the lifecycle
+  // event tally. Root-only so it never clutters a sub-agent's tool surface, and
+  // it fills the RPC/print/JSON modes the TUI FleetView can't reach. Available
+  // regardless of the `verifyLog` setting (that setting only controls auto-logging
+  // on every completion).
+  if (!isNested) {
+    pi.registerTool(defineTool({
+      name: "subagents_tree",
+      label: "Subagents Tree",
+      description:
+        "Dump the authoritative sub-agent record tree (nesting depth, parent→child links, status for every agent) plus a lifecycle-event tally. Read-only. Use to verify subagent nesting/parallelism ground truth, independent of what agents self-report.",
+      promptSnippet: "Inspect the live sub-agent tree (depths, parents, statuses, event tally)",
+      parameters: Type.Object({}),
+      execute: async () => {
+        const text = renderRecordTreeText(manager.listAgents(), { eventTally: verifyEventTally });
+        if (verifyLogPath) {
+          try { appendFileSync(verifyLogPath, text + "\n"); } catch { /* non-essential */ }
+        }
+        return textResult(text);
+      },
+    }));
+
+    pi.registerCommand("agents-tree", {
+      description: "Dump the sub-agent record tree + event tally to the verify log",
+      handler: async (_args, ctx) => {
+        const text = renderRecordTreeText(manager.listAgents(), { eventTally: verifyEventTally });
+        const target = verifyLogPath ?? join(process.cwd(), ".pi", "subagents-verify.log");
+        try { appendFileSync(target, text + "\n"); } catch { /* non-essential */ }
+        ctx.ui.notify(`subagents tree → ${target}`, "info");
+      },
+    });
+  }
 
   // ---- /agents interactive menu ----
 
@@ -2038,10 +2218,17 @@ ${systemPrompt}
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
       widgetMode: getWidgetMode(),
+      maxNestingDepth: getMaxNestingDepth(),
+      maxChildrenPerAgent: manager.getMaxChildrenPerAgent(),
+      maxTotalAgents: manager.getMaxTotalAgents(),
+      nestingTurnStep: getNestingTurnStep(),
+      nestingTurnFloor: getNestingTurnFloor(),
+      maxInheritContextDepth: getMaxInheritContextDepth(),
+      verifyLog: getVerifyLog(),
     };
   }
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxNestingDepth"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
@@ -2070,6 +2257,13 @@ ${systemPrompt}
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
+        },
+        {
+          id: "maxNestingDepth",
+          label: "Max nesting depth",
+          description: "How deep subagents may spawn subagents (1 = none/upstream, 2 = one level of grandchildren). Enter to type.",
+          currentValue: String(getMaxNestingDepth()),
+          values: [String(getMaxNestingDepth())],
         },
         {
           id: "joinMode",
@@ -2120,6 +2314,13 @@ ${systemPrompt}
           currentValue: getToolDescriptionMode(),
           values: ["full", "compact", "custom"],
         },
+        {
+          id: "verifyLog",
+          label: "Verify log",
+          description: "Append the record tree + event tally to .pi/subagents-verify.log on every agent completion (ground-truth nesting/parallelism forensics). Custom path via JSON.",
+          currentValue: verifyLogPath ? "on" : "off",
+          values: ["on", "off"],
+        },
       ];
     }
 
@@ -2144,6 +2345,12 @@ ${systemPrompt}
         if (n >= 1) {
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
+        }
+      } else if (id === "maxNestingDepth") {
+        const n = parseInt(value, 10);
+        if (n >= 1) {
+          setMaxNestingDepth(n);
+          notifyApplied(ctx, `Max nesting depth set to ${n}`);
         }
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
@@ -2178,6 +2385,9 @@ ${systemPrompt}
       } else if (id === "widgetMode") {
         setWidgetMode(value as WidgetMode);
         notifyApplied(ctx, `Widget set to ${value}`);
+      } else if (id === "verifyLog") {
+        setVerifyLog(value === "on");
+        notifyApplied(ctx, `Verify log ${value === "on" ? "enabled" : "disabled"}${verifyLogPath ? ` → ${verifyLogPath}` : ""}`);
       }
     }
 
@@ -2269,8 +2479,12 @@ ${systemPrompt}
     ctx.ui.notify(message, level);
   }
 
-  pi.registerCommand("agents", {
-    description: "Manage agents",
-    handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
-  });
+  // Only the root instance owns the /agents command — a nested instance
+  // registering it again would either error or shadow the real menu.
+  if (!isNested) {
+    pi.registerCommand("agents", {
+      description: "Manage agents",
+      handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+    });
+  }
 }

@@ -11,7 +11,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { depthContext, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -52,6 +52,10 @@ interface SpawnArgs {
   type: SubagentType;
   prompt: string;
   options: SpawnOptions;
+  /** Resolved nesting depth of the subagent (parent depth + 1). Captured in
+   * spawn() while still inside the parent's async scope so queue-drained spawns
+   * keep the correct depth even though they start outside that scope later. */
+  resolvedDepth: number;
 }
 
 interface SpawnOptions {
@@ -62,6 +66,9 @@ interface SpawnOptions {
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isBackground?: boolean;
+  /** Nesting depth to stamp on this subagent. Omit to auto-derive from the
+   * current async scope (parent depth + 1) — the normal case. */
+  depth?: number;
   /**
    * Skip the maxConcurrent queue check for this spawn — start immediately even
    * if the configured concurrency limit would otherwise queue it. Used by the
@@ -104,6 +111,9 @@ export class AgentManager {
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
   private maxConcurrent: number;
+  /** Option A guardrails — fan-out bounds for deep nesting. */
+  private maxChildrenPerAgent: number;
+  private maxTotalAgents: number;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -123,6 +133,8 @@ export class AgentManager {
     this.onStart = onStart;
     this.onCompact = onCompact;
     this.maxConcurrent = maxConcurrent;
+    this.maxChildrenPerAgent = 4;
+    this.maxTotalAgents = 32;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
@@ -137,6 +149,22 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  setMaxChildrenPerAgent(n: number) { this.maxChildrenPerAgent = Math.max(0, Math.floor(n)); }
+  getMaxChildrenPerAgent(): number { return this.maxChildrenPerAgent; }
+  setMaxTotalAgents(n: number) { this.maxTotalAgents = Math.max(1, Math.floor(n)); }
+  getMaxTotalAgents(): number { return this.maxTotalAgents; }
+
+  /** Count active (running|queued) agents, optionally scoped to a parent. */
+  private countActive(parentId?: string): number {
+    let n = 0;
+    for (const r of this.agents.values()) {
+      if (r.status !== "running" && r.status !== "queued") continue;
+      if (parentId !== undefined && r.parentId !== parentId) continue;
+      n++;
+    }
+    return n;
   }
 
   /**
@@ -177,7 +205,39 @@ export class AgentManager {
     };
     this.agents.set(id, record);
 
-    const args: SpawnArgs = { pi, ctx, type, prompt, options };
+    // Resolve nesting depth NOW, while still in the parent's async scope —
+    // depthContext holds the parent's (the spawner's) depth here. Queue-drained
+    // spawns start later outside that scope, so capturing the depth up front
+    // keeps queued grandchildren correct too. Top-level spawns have no store
+    // (depth 0) → their children are depth 1.
+    const parentStore = depthContext.getStore();
+    const resolvedDepth = options.depth ?? ((parentStore?.depth ?? 0) + 1);
+    record.depth = resolvedDepth;
+    // parentId = the spawning agent's id (from the current async scope). Undefined
+    // for depth-1 agents (spawned by the top-level session, which has no record).
+    record.parentId = parentStore?.agentId;
+
+    // --- Guardrails (Option A): bound fan-out so depth × breadth can't explode. ---
+    // The new record is already in the map, so counts include it; delete + throw
+    // on violation. Throws propagate to the Agent tool handler which surfaces them.
+    if (record.parentId) {
+      const childCount = this.countActive(record.parentId);
+      if (childCount > this.maxChildrenPerAgent) {
+        this.agents.delete(id);
+        throw new Error(
+          `Parent agent "${record.parentId}" already has ${this.maxChildrenPerAgent} active child agents ` +
+          `(maxChildrenPerAgent). Refusing to spawn more — narrow the delegation breadth.`,
+        );
+      }
+    }
+    if (this.countActive() > this.maxTotalAgents) {
+      this.agents.delete(id);
+      throw new Error(
+        `Total active-agent cap reached (maxTotalAgents=${this.maxTotalAgents}). Refusing to spawn more.`,
+      );
+    }
+
+    const args: SpawnArgs = { pi, ctx, type, prompt, options, resolvedDepth };
 
     if (options.isBackground && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
@@ -197,7 +257,7 @@ export class AgentManager {
   }
 
   /** Actually start an agent (called immediately or from queue drain). */
-  private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
+  private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options, resolvedDepth }: SpawnArgs) {
     // Re-validate a caller-supplied cwd: queued spawns can start minutes after
     // spawn()'s check, and the directory may be gone by then (TOCTOU). Same
     // curated errors; drainQueue parks a throw on the record as an error.
@@ -252,6 +312,7 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
+      depth: resolvedDepth,
       // Worktree wins for the working dir (the agent must run in the copy —
       // which, with a custom cwd, was created from that target). Config stays
       // with the parent project when a caller-supplied cwd is in play; it must
