@@ -16,8 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { renderRecordTreeText } from "./verify.js";
-import { depthContext, getAgentConversation, getDefaultMaxTurns, getMaxInheritContextDepth, getMaxNestingDepth, getGraceTurns, getNestingTurnFloor, getNestingTurnStep, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setMaxInheritContextDepth, setMaxNestingDepth, setGraceTurns, setNestingTurnFloor, setNestingTurnStep, steerAgent } from "./agent-runner.js";
+import { depthContext, getAgentConversation, getDefaultMaxTurns, getGraceTurns, getMaxInheritContextDepth, getMaxNestingDepth, getNestingTurnFloor, getNestingTurnStep, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setMaxInheritContextDepth, setMaxNestingDepth, setNestingTurnFloor, setNestingTurnStep, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -50,6 +49,7 @@ import {
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { renderRecordTreeText } from "./verify.js";
 
 // ---- Shared helpers ----
 

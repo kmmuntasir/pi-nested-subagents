@@ -39,10 +39,10 @@
 
 ## Git
 
-- **Never commit.** The user commits manually. At most, suggest a concise commit message as text.
-- **Never push**, tag, or create branches unless the user explicitly asks.
-- Never run history- or worktree-destroying commands: `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash`, `git add -A`, `git add .`, `git commit --no-verify`, or any force push.
-- Leave the working tree as the user left it — don't stage, stash, or revert files you didn't change.
+- **Agents may commit and push, but only with explicit approval from the user.** Do not commit, push, tag, or create branches unless the user explicitly asks for that action in this session. When in doubt, ask first.
+- Prefer scoped, explicit `git add <path>` over `git add -A` / `git add .` so unrelated changes aren't swept in. `git add -A` / `git add .` is allowed only when the user asks to commit "everything".
+- Never run history- or worktree-destroying commands: `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash`, `git commit --no-verify`, or any force push — even when asked, confirm first and prefer safer alternatives.
+- Leave files you didn't change or weren't asked to touch alone — don't stage, stash, or revert them.
 
 ## Issues and PRs
 

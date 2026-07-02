@@ -4,7 +4,7 @@
  * a string. Drives the registered `Agent` / `get_subagent_result` tools and
  * inspects the text delivered back, for a turn-limit abort and a user stop.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -50,6 +50,11 @@ function ctx() {
 const textOf = (r: any): string => r.content[0].text;
 
 describe("status note reaches the parent through the real handlers", () => {
+  beforeEach(() => {
+    // Reset the cross-instance root-manager singleton (see fleet-wiring.test.ts
+    // for rationale) so each test reinitialises as a root, not a nested instance.
+    delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
+  });
   afterEach(() => vi.restoreAllMocks());
 
   it("foreground turn-limit abort → the Agent result flags an incomplete outcome", async () => {

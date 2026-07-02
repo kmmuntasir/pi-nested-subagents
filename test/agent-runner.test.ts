@@ -606,7 +606,12 @@ describe("agent-runner master tool allowlist", () => {
     expect(tools).toContain("read");
   });
 
-  it("EXCLUDED_TOOL_NAMES never reach the allowlist even if an extension registers them", async () => {
+  it("EXCLUDED_TOOL_NAMES are stripped at the nesting floor even if an extension registers them", async () => {
+    // The fork made EXCLUDED_TOOL_NAMES depth-conditional: a subagent may
+    // recurse (inherit Agent/get_subagent_result/steer_subagent) until it reaches
+    // maxNestingDepth. At the floor (depth >= maxNestingDepth, default 5) the
+    // upstream always-exclude behaviour is restored, bounding the chain — and
+    // it also strips same-named tools a foreign extension tries to register.
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
@@ -616,7 +621,7 @@ describe("agent-runner master tool allowlist", () => {
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    await runAgent(ctx, "Explore", "go", { pi });
+    await runAgent(ctx, "Explore", "go", { pi, depth: 5 } /* nesting floor */);
 
     const tools = lastToolsPassed();
     expect(tools).not.toContain("Agent");

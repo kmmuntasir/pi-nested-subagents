@@ -75,6 +75,12 @@ describe("FleetView wiring (real extension lifecycle)", () => {
   let prevHome: string | undefined;
 
   beforeEach(() => {
+    // The extension publishes its root AgentManager on a Symbol.for global so
+    // nested instances can reuse it. That singleton survives across tests in the
+    // same process, which would make every test after the first detect itself
+    // as `isNested` and skip root-only wiring (RPC handlers, scheduler, fleet).
+    // Reset it so each test reinitialises as a fresh root.
+    delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
     tmpDir = mkdtempSync(join(tmpdir(), "pi-fleet-"));
     agentDir = mkdtempSync(join(tmpdir(), "pi-fleet-agentdir-"));
     prevAgentDir = process.env.PI_CODING_AGENT_DIR;

@@ -6,6 +6,9 @@ import type { AgentRecord } from "../src/types.js";
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
   resumeAgent: vi.fn(),
+  // agent-manager reads the spawner's async scope to stamp parentId/depth.
+  // An undefined store mirrors a top-level spawn (parentId undefined, depth 1).
+  depthContext: { getStore: () => undefined },
 }));
 
 vi.mock("../src/worktree.js", () => ({
