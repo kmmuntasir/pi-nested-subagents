@@ -1,11 +1,11 @@
-# @tintinweb/pi-subagents
+# @kmmuntasir/pi-nested-subagents
 
-A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in foreground or background, steer them mid-run, resume completed sessions, and define your own custom agent types.
+A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents** to pi, with **safe configurable nesting depth** (subagents can spawn their own subagents) and **built-in ground-truth verification**. A fork of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) — everything upstream does still works; deep nesting and verification are layered on top. See [`.docs/fork-rationale-and-architecture.md`](.docs/fork-rationale-and-architecture.md) for the full rationale.
 
-<img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
+<img width="600" alt="pi-nested-subagents screenshot" src="https://github.com/kmmuntasir/pi-nested-subagents/raw/main/media/screenshot.png" />
 
 
-https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
+https://github.com/kmmuntasir/pi-nested-subagents/raw/main/media/demo.mp4
 
 
 ## Features
@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Install
 
 ```bash
-pi install npm:@tintinweb/pi-subagents
+pi install npm:@kmmuntasir/pi-nested-subagents
 ```
 
 Or load directly for development:
@@ -625,4 +625,4 @@ src/
 
 ## License
 
-MIT — [tintinweb](https://github.com/tintinweb)
+MIT — original by [tintinweb](https://github.com/tintinweb); this fork maintained by [kmmuntasir](https://github.com/kmmuntasir).
