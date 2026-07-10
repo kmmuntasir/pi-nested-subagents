@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Default background agent concurrency raised from 4 to 16.** The `DEFAULT_MAX_CONCURRENT` constant in `agent-manager.ts` now sets the limit to 16 for new sessions, allowing more parallel subagent execution without manual configuration. Existing projects that set `maxConcurrent` in `.pi/subagents.json` are unaffected.
+
 ## [0.1.0] - 2026-07-02
 
 Initial fork release. The base extension is [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) v0.13.0, preserved unchanged; this release layers on **safe deep subagent nesting** and **built-in ground-truth verification**. See [`.docs/fork-rationale-and-architecture.md`](.docs/fork-rationale-and-architecture.md) for the full design.
